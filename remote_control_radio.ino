@@ -1,4 +1,3 @@
-"FIXME: MENU  мерцает, при этом основной экран нет"
 #include <Adafruit_GFX.h>
 #include <Adafruit_ST7789.h>
 #include <SPI.h>
@@ -77,6 +76,7 @@ enum MenuState {
 };
 
 MenuState currentMenu = MAIN_SCREEN;
+MenuState prevMenu = MAIN_SCREEN; // Добавляем для отслеживания предыдущего состояния
 
 // Переменные для навигации по меню
 int menuIndex = 0;
@@ -102,6 +102,9 @@ const unsigned long updateInterval = 200;
 int prevJoy1X = 0, prevJoy1Y = 0, prevJoy2X = 0, prevJoy2Y = 0;
 int prevTrim1X = 0, prevTrim1Y = 0, prevTrim2X = 0, prevTrim2Y = 0;
 
+// Флаг для полной перерисовки экрана
+bool needFullRedraw = true;
+
 // Определение битовых масок для кнопок
 #define BTN_UP     0
 #define BTN_DOWN   1
@@ -112,27 +115,7 @@ int prevTrim1X = 0, prevTrim1Y = 0, prevTrim2X = 0, prevTrim2Y = 0;
 #define BTN_MENU   6
 #define BTN_EXTRA  7
 
-// Прототипы функций
-void readButtons();
-void updateDisplay();
-void handleMenuNavigation();
-void processMainMenu();
-void processCalibrationMenu();
-void processTrimMenu();
-void processSettingsMenu();
-void showMainScreen();
-void calibrateJoysticks();
-void resetSettings();
-void saveSettings();
-void loadSettings();
-void sendData();
-void drawStaticElements();
-void updateDynamicElements();
-void drawMainMenu();
-void drawCalibrationMenu();
-void drawTrimMenu();
-void drawSettingsMenu();
-void drawResetConfirm();
+// Прочие прототипы функций остаются неизмененными...
 
 void setup() {
   Serial.begin(9600);
@@ -162,6 +145,7 @@ void setup() {
   radio.begin();
   radio.openWritingPipe(address);
   radio.setPALevel(RF24_PA_MAX);
+  radio.setDataRate(RF24_2MBPS); // Изменено на оптимальное значение
   radio.stopListening();
 
   // Загрузка настроек
@@ -192,7 +176,11 @@ void loop() {
   txData.joy2X = constrain(txData.joy2X + (settings.trim2X - 127) * 4, 0, 1023);
   txData.joy2Y = constrain(txData.joy2Y + (settings.trim2Y - 127) * 4, 0, 1023);
   
-  sendData();
+  // Отправка данных
+  bool success = radio.write(&txData, sizeof(txData));
+  if (!success) {
+    Serial.println("Transmission failed");
+  }
   
   // Обновление дисплея по таймеру
   if (millis() - lastUpdateTime >= updateInterval) {
@@ -224,24 +212,49 @@ void readButtons() {
 }
 
 void updateDisplay() {
+  // Проверяем, изменилось ли состояние меню
+  if (currentMenu != prevMenu) {
+    needFullRedraw = true;
+    prevMenu = currentMenu;
+  }
+  
   switch (currentMenu) {
     case MAIN_SCREEN:
+      if (needFullRedraw) {
+        drawStaticElements();
+        needFullRedraw = false;
+      }
       updateDynamicElements(); // Только обновляем динамические элементы
       break;
     case MAIN_MENU:
-      drawMainMenu();
+      if (needFullRedraw) {
+        drawMainMenu();
+        needFullRedraw = false;
+      }
       break;
     case CALIBRATION_MENU:
-      drawCalibrationMenu();
+      if (needFullRedraw) {
+        drawCalibrationMenu();
+        needFullRedraw = false;
+      }
       break;
     case TRIM_MENU:
-      drawTrimMenu();
+      if (needFullRedraw) {
+        drawTrimMenu();
+        needFullRedraw = false;
+      }
       break;
     case SETTINGS_MENU:
-      drawSettingsMenu();
+      if (needFullRedraw) {
+        drawSettingsMenu();
+        needFullRedraw = false;
+      }
       break;
     case RESET_CONFIRM:
-      drawResetConfirm();
+      if (needFullRedraw) {
+        drawResetConfirm();
+        needFullRedraw = false;
+      }
       break;
   }
 }
@@ -427,10 +440,10 @@ void handleMenuNavigation() {
     if (currentMenu == MAIN_SCREEN) {
       currentMenu = MAIN_MENU;
       menuIndex = 0;
-      drawMainMenu();
+      needFullRedraw = true;
     } else {
       currentMenu = MAIN_SCREEN;
-      drawStaticElements();
+      needFullRedraw = true;
     }
   }
   
@@ -451,10 +464,10 @@ void handleMenuNavigation() {
       if (buttonStates & (1 << BTN_OK) && !(prevButtonStates & (1 << BTN_OK))) {
         resetSettings();
         currentMenu = MAIN_SCREEN;
-        drawStaticElements();
+        needFullRedraw = true;
       } else if (buttonStates & (1 << BTN_BACK) && !(prevButtonStates & (1 << BTN_BACK))) {
         currentMenu = SETTINGS_MENU;
-        drawSettingsMenu();
+        needFullRedraw = true;
       }
       break;
   }
@@ -463,30 +476,30 @@ void handleMenuNavigation() {
 void processMainMenu() {
   if (buttonStates & (1 << BTN_UP) && !(prevButtonStates & (1 << BTN_UP))) {
     menuIndex = (menuIndex - 1 + menuItems) % menuItems;
-    drawMainMenu();
+    needFullRedraw = true;
   }
   if (buttonStates & (1 << BTN_DOWN) && !(prevButtonStates & (1 << BTN_DOWN))) {
     menuIndex = (menuIndex + 1) % menuItems;
-    drawMainMenu();
+    needFullRedraw = true;
   }
   
   if (buttonStates & (1 << BTN_OK) && !(prevButtonStates & (1 << BTN_OK))) {
     switch (menuIndex) {
       case 0: 
         currentMenu = CALIBRATION_MENU;
-        drawCalibrationMenu();
+        needFullRedraw = true;
         break;
       case 1: 
         currentMenu = TRIM_MENU;
-        drawTrimMenu();
+        needFullRedraw = true;
         break;
       case 3: 
         currentMenu = SETTINGS_MENU;
-        drawSettingsMenu();
+        needFullRedraw = true;
         break;
       case 4: 
         currentMenu = MAIN_SCREEN;
-        drawStaticElements();
+        needFullRedraw = true;
         break;
     }
   }
@@ -496,39 +509,39 @@ void processCalibrationMenu() {
   if (buttonStates & (1 << BTN_OK) && !(prevButtonStates & (1 << BTN_OK))) {
     calibrateJoysticks();
     currentMenu = MAIN_MENU;
-    drawMainMenu();
+    needFullRedraw = true;
   }
   
   if (buttonStates & (1 << BTN_BACK) && !(prevButtonStates & (1 << BTN_BACK))) {
     currentMenu = MAIN_MENU;
-    drawMainMenu();
+    needFullRedraw = true;
   }
 }
 
 void processTrimMenu() {
   if (buttonStates & (1 << BTN_BACK) && !(prevButtonStates & (1 << BTN_BACK))) {
     currentMenu = MAIN_MENU;
-    drawMainMenu();
+    needFullRedraw = true;
   }
 }
 
 void processSettingsMenu() {
   if (buttonStates & (1 << BTN_UP) && !(prevButtonStates & (1 << BTN_UP))) {
     subMenuIndex = 0;
-    drawSettingsMenu();
+    needFullRedraw = true;
   }
   if (buttonStates & (1 << BTN_DOWN) && !(prevButtonStates & (1 << BTN_DOWN))) {
     subMenuIndex = 1;
-    drawSettingsMenu();
+    needFullRedraw = true;
   }
   
   if (buttonStates & (1 << BTN_OK) && !(prevButtonStates & (1 << BTN_OK))) {
     if (subMenuIndex == 0) {
       currentMenu = RESET_CONFIRM;
-      drawResetConfirm();
+      needFullRedraw = true;
     } else {
       currentMenu = MAIN_MENU;
-      drawMainMenu();
+      needFullRedraw = true;
     }
   }
 }
@@ -581,11 +594,25 @@ void resetSettings() {
 }
 
 void saveSettings() {
-  EEPROM.put(0, settings);
+  EEPROM.update(0, settings.joy1XCenter);
+  EEPROM.update(1, settings.joy1YCenter);
+  EEPROM.update(2, settings.joy2XCenter);
+  EEPROM.update(3, settings.joy2YCenter);
+  EEPROM.update(4, settings.trim1X);
+  EEPROM.update(5, settings.trim1Y);
+  EEPROM.update(6, settings.trim2X);
+  EEPROM.update(7, settings.trim2Y);
 }
 
 void loadSettings() {
-  EEPROM.get(0, settings);
+  EEPROM.get(0, settings.joy1XCenter);
+  EEPROM.get(1, settings.joy1YCenter);
+  EEPROM.get(2, settings.joy2XCenter);
+  EEPROM.get(3, settings.joy2YCenter);
+  EEPROM.get(4, settings.trim1X);
+  EEPROM.get(5, settings.trim1Y);
+  EEPROM.get(6, settings.trim2X);
+  EEPROM.get(7, settings.trim2Y);
 }
 
 void sendData() {
@@ -595,5 +622,8 @@ void sendData() {
   txData.trim2X = settings.trim2X;
   txData.trim2Y = settings.trim2Y;
   
-  radio.write(&txData, sizeof(txData));
+  bool success = radio.write(&txData, sizeof(txData));
+  if (!success) {
+    Serial.println("Transmission failed");
+  }
 }

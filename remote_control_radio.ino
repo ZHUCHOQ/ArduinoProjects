@@ -1,3 +1,4 @@
+"FIXME: MENU  мерцает, при этом основной экран нет"
 #include <Adafruit_GFX.h>
 #include <Adafruit_ST7789.h>
 #include <SPI.h>

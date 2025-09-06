@@ -1,558 +1,598 @@
-#include <SPI.h>
-#include <Wire.h>
 #include <Adafruit_GFX.h>
 #include <Adafruit_ST7789.h>
-#include <RF24.h>
+#include <SPI.h>
 #include <EEPROM.h>
+#include <RF24.h>
 
-// Пины дисплея
-#define TFT_CS   3
-#define TFT_DC   4
-#define TFT_RST  5
-#define TFT_BL   2
+// Определение пинов для дисплея
+#define TFT_CS    3
+#define TFT_DC    4
+#define TFT_RST   5
 
-// Пины nRF24L01
-#define CE_PIN   9
-#define CSN_PIN  10
+// Определение пинов для регистров
+const int loadPin = 8;   // SH/LD
+const int clockPin = 2;  // CLK
+const int dataPin = 6;   // QH первого регистра
 
-// Пины регистров сдвига
-#define LATCH_PIN 8   // SH/LD
-#define CLOCK_PIN 0   // CLK (RX)
-#define DATA_PIN  1   // Q7 (TX)
-#define ENABLE_PIN A6 // CLK INH
+// Определение пинов для джойстиков
+#define JOY1_X     A0
+#define JOY1_Y     A1
+#define JOY1_BTN   A2
+#define JOY2_X     A3
+#define JOY2_Y     A4
+#define JOY2_BTN   A5
 
-// Пины управления
-#define MOTOR_PIN 7   // Вибромоторы
-#define BUZZER_PIN 6  // Зуммер
+// Определение пинов для nRF24L01
+#define CE_PIN     9
+#define CSN_PIN    10
 
-// Аналоговые пины для джойстиков
-#define JOY1_X A0
-#define JOY1_Y A1
-#define JOY2_X A2
-#define JOY2_Y A3
-
-// Создание объектов
+// Инициализация дисплея
 Adafruit_ST7789 tft = Adafruit_ST7789(TFT_CS, TFT_DC, TFT_RST);
+
+// Инициализация радио модуля
 RF24 radio(CE_PIN, CSN_PIN);
 
 // Адрес для радио связи
-const uint64_t address = 0xF0F0F0F0E1LL;
+const byte address[6] = "00001";
 
 // Структура для передачи данных
-struct ControlData {
-  int16_t roll;     // Крен
-  int16_t pitch;    // Тангаж
-  int16_t throttle; // Газ
-  int16_t yaw;      // Рыскание
-  uint8_t buttons;  // Состояние кнопок
-  uint8_t trim[4];  // Триммеры
+struct DataPacket {
+  int joy1X;
+  int joy1Y;
+  int joy2X;
+  int joy2Y;
+  byte buttons;
+  byte trim1X;
+  byte trim1Y;
+  byte trim2X;
+  byte trim2Y;
 };
-ControlData controlData;
 
-// Структура для калибровочных данных
-struct CalibrationData {
-  int16_t joy1X_center;
-  int16_t joy1Y_center;
-  int16_t joy2X_center;
-  int16_t joy2Y_center;
-  uint8_t checksum;
+DataPacket txData;
+
+// Структура для хранения настроек в EEPROM
+struct Settings {
+  int joy1XCenter;
+  int joy1YCenter;
+  int joy2XCenter;
+  int joy2YCenter;
+  byte trim1X;
+  byte trim1Y;
+  byte trim2X;
+  byte trim2Y;
+  byte channelMapping;
 };
-CalibrationData calibration;
+
+Settings settings;
 
 // Состояния меню
 enum MenuState {
   MAIN_SCREEN,
-  SETTINGS,
-  CALIBRATION,
-  TRIM_SETTINGS,
+  MAIN_MENU,
+  CALIBRATION_MENU,
+  TRIM_MENU,
+  SETTINGS_MENU,
   RESET_CONFIRM
 };
-MenuState menuState = MAIN_SCREEN;
 
-// Переменные для навигации
+MenuState currentMenu = MAIN_SCREEN;
+
+// Переменные для навигации по меню
 int menuIndex = 0;
-int trimIndex = 0;
+int subMenuIndex = 0;
+const int menuItems = 5;
+String mainMenu[menuItems] = {
+  "Calibration",
+  "Trim Settings",
+  "Channel Map",
+  "System Settings",
+  "Exit"
+};
 
-// Состояние кнопок
-uint16_t buttonState = 0;
-uint16_t lastButtonState = 0;
+// Переменные для кнопок
+uint16_t buttonStates = 0;
+uint16_t prevButtonStates = 0;
+
+// Переменные для управления обновлением дисплея
+unsigned long lastUpdateTime = 0;
+const unsigned long updateInterval = 200;
+
+// Переменные для хранения предыдущих значений
+int prevJoy1X = 0, prevJoy1Y = 0, prevJoy2X = 0, prevJoy2Y = 0;
+int prevTrim1X = 0, prevTrim1Y = 0, prevTrim2X = 0, prevTrim2Y = 0;
 
 // Определение битовых масок для кнопок
-#define BTN_UP    0
-#define BTN_DOWN  1
-#define BTN_LEFT  2
-#define BTN_RIGHT 3
-#define BTN_OK    4
-#define BTN_BACK  5
-#define BTN_MENU  6
-#define BTN_EXTRA 7
+#define BTN_UP     0
+#define BTN_DOWN   1
+#define BTN_LEFT   2
+#define BTN_RIGHT  3
+#define BTN_OK     4
+#define BTN_BACK   5
+#define BTN_MENU   6
+#define BTN_EXTRA  7
 
-// Таймеры
-unsigned long lastSendTime = 0;
-unsigned long lastDisplayUpdate = 0;
-const unsigned long SEND_INTERVAL = 20;
-const unsigned long DISPLAY_INTERVAL = 500; // Увеличено для уменьшения мерцания
-
-// Переменные для управления отрисовкой
-bool needRedraw = true;
-MenuState lastMenuState = MAIN_SCREEN;
-int lastMenuIndex = 0;
-int lastTrimIndex = 0;
+// Прототипы функций
+void readButtons();
+void updateDisplay();
+void handleMenuNavigation();
+void processMainMenu();
+void processCalibrationMenu();
+void processTrimMenu();
+void processSettingsMenu();
+void showMainScreen();
+void calibrateJoysticks();
+void resetSettings();
+void saveSettings();
+void loadSettings();
+void sendData();
+void drawStaticElements();
+void updateDynamicElements();
+void drawMainMenu();
+void drawCalibrationMenu();
+void drawTrimMenu();
+void drawSettingsMenu();
+void drawResetConfirm();
 
 void setup() {
-  // Инициализация пинов
-  pinMode(MOTOR_PIN, OUTPUT);
-  pinMode(BUZZER_PIN, OUTPUT);
-  pinMode(TFT_BL, OUTPUT);
-  digitalWrite(TFT_BL, HIGH); // Включение подсветки
+  Serial.begin(9600);
   
-  // Инициализация регистров сдвига
-  pinMode(LATCH_PIN, OUTPUT);
-  pinMode(CLOCK_PIN, OUTPUT);
-  pinMode(DATA_PIN, INPUT);
-  pinMode(ENABLE_PIN, OUTPUT);
-  digitalWrite(ENABLE_PIN, LOW);
+  // Инициализация пинов регистров
+  pinMode(loadPin, OUTPUT);
+  pinMode(clockPin, OUTPUT);
+  pinMode(dataPin, INPUT);
+  digitalWrite(clockPin, HIGH);
+  digitalWrite(loadPin, HIGH);
   
-  // Инициализация дисплея 240x240
-  tft.init(240, 240);
-  tft.setRotation(1);
+  // Настройка пинов кнопок джойстиков
+  pinMode(JOY1_BTN, INPUT_PULLUP);
+  pinMode(JOY2_BTN, INPUT_PULLUP);
+
+  // Инициализация дисплея с поворотом на 180 градусов
+  tft.init(240, 240, SPI_MODE2);
+  tft.setRotation(2);  // Поворот на 180 градусов
   tft.fillScreen(ST77XX_BLACK);
-  tft.setTextColor(ST77XX_WHITE);
   tft.setTextSize(2);
-  tft.setTextWrap(false);
-  
-  // Устанавливаем скорость SPI (может помочь с мерцанием)
-  SPI.setClockDivider(SPI_CLOCK_DIV2);
-  
-  // Инициализация радио
+  tft.setTextColor(ST77XX_WHITE);
+  tft.setCursor(50, 100);
+  tft.println("RC Transmitter");
+  delay(1000);
+
+  // Инициализация радио модуля
   radio.begin();
-  radio.setDataRate(RF24_250KBPS);
   radio.openWritingPipe(address);
   radio.setPALevel(RF24_PA_MAX);
   radio.stopListening();
-  
-  // Загрузка калибровочных данных
-  loadCalibration();
-  
-  // Проверка контрольной суммы
-  if (calibration.checksum != calculateChecksum()) {
-    // Значения по умолчанию
-    calibration.joy1X_center = 512;
-    calibration.joy1Y_center = 512;
-    calibration.joy2X_center = 512;
-    calibration.joy2Y_center = 512;
-    calibration.checksum = calculateChecksum();
-    saveCalibration();
+
+  // Загрузка настроек
+  loadSettings();
+
+  // Первоначальная калибровка
+  if (settings.joy1XCenter == 0) {
+    calibrateJoysticks();
   }
-  
-  // Инициализация триммеров
-  for (int i = 0; i < 4; i++) {
-    controlData.trim[i] = 0;
-  }
-  
-  // Приветственное сообщение
-  showSplashScreen();
+
+  // Рисуем статические элементы
+  drawStaticElements();
 }
 
 void loop() {
-  // Опрос кнопок
   readButtons();
-  
-  // Обработка навигации
   handleMenuNavigation();
   
-  // Чтение джойстиков
-  readJoysticks();
+  // Чтение значений джойстиков
+  txData.joy1X = analogRead(JOY1_X);
+  txData.joy1Y = analogRead(JOY1_Y);
+  txData.joy2X = analogRead(JOY2_X);
+  txData.joy2Y = analogRead(JOY2_Y);
   
-  // Отправка данных
-  unsigned long currentTime = millis();
-  if (currentTime - lastSendTime >= SEND_INTERVAL) {
-    sendData();
-    lastSendTime = currentTime;
+  // Применение триммов
+  txData.joy1X = constrain(txData.joy1X + (settings.trim1X - 127) * 4, 0, 1023);
+  txData.joy1Y = constrain(txData.joy1Y + (settings.trim1Y - 127) * 4, 0, 1023);
+  txData.joy2X = constrain(txData.joy2X + (settings.trim2X - 127) * 4, 0, 1023);
+  txData.joy2Y = constrain(txData.joy2Y + (settings.trim2Y - 127) * 4, 0, 1023);
+  
+  sendData();
+  
+  // Обновление дисплея по таймеру
+  if (millis() - lastUpdateTime >= updateInterval) {
+    updateDisplay();
+    lastUpdateTime = millis();
   }
   
-  // Обновление дисплея (реже для уменьшения мерцания)
-  if (currentTime - lastDisplayUpdate >= DISPLAY_INTERVAL) {
-    // Проверяем, нужно ли перерисовывать экран
-    if (needRedraw || menuState != lastMenuState || 
-        menuIndex != lastMenuIndex || trimIndex != lastTrimIndex) {
-      updateDisplay();
-      lastDisplayUpdate = currentTime;
-      needRedraw = false;
-      lastMenuState = menuState;
-      lastMenuIndex = menuIndex;
-      lastTrimIndex = trimIndex;
-    }
-  }
-}
-
-void showSplashScreen() {
-  tft.fillScreen(ST77XX_BLACK);
-  tft.setTextSize(3);
-  tft.setTextColor(ST77XX_WHITE);
-  tft.setCursor(40, 100);
-  tft.print("RC Transmitter");
-  
-  // Короткий звуковой сигнал
-  digitalWrite(BUZZER_PIN, HIGH);
-  delay(100);
-  digitalWrite(BUZZER_PIN, LOW);
-  
-  // Вибрация
-  digitalWrite(MOTOR_PIN, HIGH);
-  delay(200);
-  digitalWrite(MOTOR_PIN, LOW);
-  
-  delay(1500);
-  tft.fillScreen(ST77XX_BLACK);
-  needRedraw = true;
+  delay(50);
 }
 
 void readButtons() {
-  lastButtonState = buttonState;
+  prevButtonStates = buttonStates;
   
-  digitalWrite(LATCH_PIN, LOW);
+  digitalWrite(loadPin, LOW);
   delayMicroseconds(5);
-  digitalWrite(LATCH_PIN, HIGH);
-  
-  buttonState = 0;
+  digitalWrite(loadPin, HIGH);
+  delayMicroseconds(5);
+
+  buttonStates = 0;
   for (int i = 0; i < 16; i++) {
-    buttonState |= (digitalRead(DATA_PIN) << i);
-    digitalWrite(CLOCK_PIN, HIGH);
+    buttonStates = (buttonStates << 1) | digitalRead(dataPin);
+    digitalWrite(clockPin, LOW);
     delayMicroseconds(5);
-    digitalWrite(CLOCK_PIN, LOW);
+    digitalWrite(clockPin, HIGH);
+    delayMicroseconds(5);
   }
-}
-
-void handleMenuNavigation() {
-  bool upPressed = (buttonState & (1 << BTN_UP)) && !(lastButtonState & (1 << BTN_UP));
-  bool downPressed = (buttonState & (1 << BTN_DOWN)) && !(lastButtonState & (1 << BTN_DOWN));
-  bool leftPressed = (buttonState & (1 << BTN_LEFT)) && !(lastButtonState & (1 << BTN_LEFT));
-  bool rightPressed = (buttonState & (1 << BTN_RIGHT)) && !(lastButtonState & (1 << BTN_RIGHT));
-  bool okPressed = (buttonState & (1 << BTN_OK)) && !(lastButtonState & (1 << BTN_OK));
-  bool backPressed = (buttonState & (1 << BTN_BACK)) && !(lastButtonState & (1 << BTN_BACK));
-  bool menuPressed = (buttonState & (1 << BTN_MENU)) && !(lastButtonState & (1 << BTN_MENU));
   
-  switch (menuState) {
-    case MAIN_SCREEN:
-      if (menuPressed) {
-        menuState = SETTINGS;
-        menuIndex = 0;
-        needRedraw = true;
-        beep();
-      }
-      break;
-      
-    case SETTINGS:
-      if (upPressed) {
-        menuIndex = (menuIndex - 1 + 4) % 4;
-        needRedraw = true;
-        beep();
-      } else if (downPressed) {
-        menuIndex = (menuIndex + 1) % 4;
-        needRedraw = true;
-        beep();
-      } else if (okPressed) {
-        beep();
-        if (menuIndex == 0) {
-          menuState = CALIBRATION;
-          needRedraw = true;
-        } else if (menuIndex == 1) {
-          menuState = TRIM_SETTINGS;
-          trimIndex = 0;
-          needRedraw = true;
-        } else if (menuIndex == 2) {
-          menuState = RESET_CONFIRM;
-          needRedraw = true;
-        } else if (menuIndex == 3) {
-          menuState = MAIN_SCREEN;
-          needRedraw = true;
-        }
-      } else if (backPressed) {
-        menuState = MAIN_SCREEN;
-        needRedraw = true;
-        beep();
-      }
-      break;
-      
-    case CALIBRATION:
-      if (okPressed) {
-        calibrateJoysticks();
-        saveCalibration();
-        menuState = SETTINGS;
-        needRedraw = true;
-        beep();
-      } else if (backPressed) {
-        menuState = SETTINGS;
-        needRedraw = true;
-        beep();
-      }
-      break;
-      
-    case TRIM_SETTINGS:
-      if (upPressed) {
-        trimIndex = (trimIndex - 1 + 5) % 5;
-        needRedraw = true;
-        beep();
-      } else if (downPressed) {
-        trimIndex = (trimIndex + 1) % 5;
-        needRedraw = true;
-        beep();
-      } else if (leftPressed && trimIndex < 4) {
-        controlData.trim[trimIndex] -= 5;
-        needRedraw = true;
-        beep();
-      } else if (rightPressed && trimIndex < 4) {
-        controlData.trim[trimIndex] += 5;
-        needRedraw = true;
-        beep();
-      } else if (okPressed) {
-        if (trimIndex == 4) {
-          menuState = SETTINGS;
-          needRedraw = true;
-        }
-        beep();
-      } else if (backPressed) {
-        menuState = SETTINGS;
-        needRedraw = true;
-        beep();
-      }
-      break;
-      
-    case RESET_CONFIRM:
-      if (okPressed) {
-        resetToDefaults();
-        menuState = SETTINGS;
-        needRedraw = true;
-        beep();
-      } else if (backPressed) {
-        menuState = SETTINGS;
-        needRedraw = true;
-        beep();
-      }
-      break;
-  }
-}
-
-void readJoysticks() {
-  int joy1X = analogRead(JOY1_X);
-  int joy1Y = analogRead(JOY1_Y);
-  int joy2X = analogRead(JOY2_X);
-  int joy2Y = analogRead(JOY2_Y);
-  
-  controlData.roll = map(joy1X, 0, 1023, -512, 512) - (calibration.joy1X_center - 512);
-  controlData.pitch = map(joy1Y, 0, 1023, -512, 512) - (calibration.joy1Y_center - 512);
-  controlData.throttle = map(joy2Y, 0, 1023, 0, 1023);
-  controlData.yaw = map(joy2X, 0, 1023, -512, 512) - (calibration.joy2X_center - 512);
-  
-  controlData.roll += controlData.trim[0];
-  controlData.pitch += controlData.trim[1];
-  controlData.throttle += controlData.trim[2];
-  controlData.yaw += controlData.trim[3];
-  
-  controlData.roll = constrain(controlData.roll, -512, 512);
-  controlData.pitch = constrain(controlData.pitch, -512, 512);
-  controlData.throttle = constrain(controlData.throttle, 0, 1023);
-  controlData.yaw = constrain(controlData.yaw, -512, 512);
-}
-
-void sendData() {
-  controlData.buttons = buttonState & 0xFF;
-  radio.write(&controlData, sizeof(controlData));
+  buttonStates = ~buttonStates;
 }
 
 void updateDisplay() {
-  tft.fillScreen(ST77XX_BLACK);
-  
-  switch (menuState) {
+  switch (currentMenu) {
     case MAIN_SCREEN:
-      drawMainScreen();
+      updateDynamicElements(); // Только обновляем динамические элементы
       break;
-      
-    case SETTINGS:
-      drawSettingsScreen();
+    case MAIN_MENU:
+      drawMainMenu();
       break;
-      
-    case CALIBRATION:
-      drawCalibrationScreen();
+    case CALIBRATION_MENU:
+      drawCalibrationMenu();
       break;
-      
-    case TRIM_SETTINGS:
-      drawTrimSettingsScreen();
+    case TRIM_MENU:
+      drawTrimMenu();
       break;
-      
+    case SETTINGS_MENU:
+      drawSettingsMenu();
+      break;
     case RESET_CONFIRM:
-      drawResetConfirmScreen();
+      drawResetConfirm();
       break;
   }
 }
 
-void drawMainScreen() {
+void drawStaticElements() {
+  // Статические элементы главного экрана
+  tft.fillScreen(ST77XX_BLACK);
   tft.setTextSize(2);
   tft.setTextColor(ST77XX_WHITE);
+  tft.setCursor(60, 10);
+  tft.println("RC Transmitter");
   
-  // Отображение значений джойстиков
-  tft.setCursor(10, 10);
-  tft.print("Roll: ");
-  tft.print(controlData.roll);
-  tft.print("  ");
-  
+  // Рисуем статические подписи
+  tft.setTextSize(1);
   tft.setCursor(10, 40);
-  tft.print("Pitch: ");
-  tft.print(controlData.pitch);
-  tft.print("  ");
-  
-  tft.setCursor(10, 70);
-  tft.print("Thr: ");
-  tft.print(controlData.throttle);
-  tft.print("  ");
-  
+  tft.print("Joy1 X: ");
+  tft.setCursor(10, 60);
+  tft.print("Joy1 Y: ");
+  tft.setCursor(10, 80);
+  tft.print("Joy2 X: ");
   tft.setCursor(10, 100);
-  tft.print("Yaw: ");
-  tft.print(controlData.yaw);
-  tft.print("  ");
+  tft.print("Joy2 Y: ");
+  tft.setCursor(10, 120);
+  tft.print("Trim1 X: ");
+  tft.setCursor(10, 140);
+  tft.print("Trim1 Y: ");
+  tft.setCursor(10, 160);
+  tft.print("Trim2 X: ");
+  tft.setCursor(10, 180);
+  tft.print("Trim2 Y: ");
   
-  // Отображение триммеров
-  tft.setTextSize(1);
-  tft.setCursor(10, 130);
-  tft.print("Trim R:");
-  tft.print(controlData.trim[0]);
-  tft.print(" P:");
-  tft.print(controlData.trim[1]);
-  
-  tft.setCursor(10, 150);
-  tft.print("Trim T:");
-  tft.print(controlData.trim[2]);
-  tft.print(" Y:");
-  tft.print(controlData.trim[3]);
-  
-  // Инструкция
-  tft.setTextSize(1);
-  tft.setCursor(60, 200);
-  tft.print("Menu ->");
+  tft.setCursor(10, 220);
+  tft.println("Press MENU for options");
 }
 
-void drawSettingsScreen() {
+void updateDynamicElements() {
+  // Обновляем только изменяющиеся значения
+  tft.setTextSize(1);
+  tft.setTextColor(ST77XX_WHITE);
+  
+  // Обновляем Joy1 X
+  int joy1X = map(txData.joy1X, 0, 1023, -100, 100);
+  if (joy1X != prevJoy1X) {
+    tft.fillRect(70, 40, 40, 10, ST77XX_BLACK);
+    tft.setCursor(70, 40);
+    tft.print(joy1X);
+    tft.print("%");
+    prevJoy1X = joy1X;
+  }
+  
+  // Обновляем Joy1 Y
+  int joy1Y = map(txData.joy1Y, 0, 1023, -100, 100);
+  if (joy1Y != prevJoy1Y) {
+    tft.fillRect(70, 60, 40, 10, ST77XX_BLACK);
+    tft.setCursor(70, 60);
+    tft.print(joy1Y);
+    tft.print("%");
+    prevJoy1Y = joy1Y;
+  }
+  
+  // Обновляем Joy2 X
+  int joy2X = map(txData.joy2X, 0, 1023, -100, 100);
+  if (joy2X != prevJoy2X) {
+    tft.fillRect(70, 80, 40, 10, ST77XX_BLACK);
+    tft.setCursor(70, 80);
+    tft.print(joy2X);
+    tft.print("%");
+    prevJoy2X = joy2X;
+  }
+  
+  // Обновляем Joy2 Y
+  int joy2Y = map(txData.joy2Y, 0, 1023, -100, 100);
+  if (joy2Y != prevJoy2Y) {
+    tft.fillRect(70, 100, 40, 10, ST77XX_BLACK);
+    tft.setCursor(70, 100);
+    tft.print(joy2Y);
+    tft.print("%");
+    prevJoy2Y = joy2Y;
+  }
+  
+  // Обновляем Trim1 X
+  int trim1X = settings.trim1X - 127;
+  if (trim1X != prevTrim1X) {
+    tft.fillRect(70, 120, 40, 10, ST77XX_BLACK);
+    tft.setCursor(70, 120);
+    tft.print(trim1X);
+    prevTrim1X = trim1X;
+  }
+  
+  // Обновляем Trim1 Y
+  int trim1Y = settings.trim1Y - 127;
+  if (trim1Y != prevTrim1Y) {
+    tft.fillRect(70, 140, 40, 10, ST77XX_BLACK);
+    tft.setCursor(70, 140);
+    tft.print(trim1Y);
+    prevTrim1Y = trim1Y;
+  }
+  
+  // Обновляем Trim2 X
+  int trim2X = settings.trim2X - 127;
+  if (trim2X != prevTrim2X) {
+    tft.fillRect(70, 160, 40, 10, ST77XX_BLACK);
+    tft.setCursor(70, 160);
+    tft.print(trim2X);
+    prevTrim2X = trim2X;
+  }
+  
+  // Обновляем Trim2 Y
+  int trim2Y = settings.trim2Y - 127;
+  if (trim2Y != prevTrim2Y) {
+    tft.fillRect(70, 180, 40, 10, ST77XX_BLACK);
+    tft.setCursor(70, 180);
+    tft.print(trim2Y);
+    prevTrim2Y = trim2Y;
+  }
+}
+
+void drawMainMenu() {
+  tft.fillScreen(ST77XX_BLACK);
   tft.setTextSize(2);
   tft.setTextColor(ST77XX_WHITE);
-  tft.setCursor(60, 10);
-  tft.print("SETTINGS");
+  tft.setCursor(80, 10);
+  tft.println("Menu");
   
-  for (int i = 0; i < 4; i++) {
-    tft.setCursor(40, 50 + i * 30);
+  tft.setTextSize(1);
+  for (int i = 0; i < menuItems; i++) {
     if (i == menuIndex) {
-      tft.setTextColor(ST77XX_RED);
-      tft.print("> ");
+      tft.setTextColor(ST77XX_BLACK, ST77XX_WHITE);
     } else {
-      tft.setTextColor(ST77XX_WHITE);
-      tft.print("  ");
+      tft.setTextColor(ST77XX_WHITE, ST77XX_BLACK);
     }
-    
-    switch(i) {
-      case 0: tft.print("Calibration"); break;
-      case 1: tft.print("Trimmers"); break;
-      case 2: tft.print("Reset Settings"); break;
-      case 3: tft.print("Back"); break;
-    }
+    tft.setCursor(20, 50 + i * 20);
+    tft.println(mainMenu[i]);
   }
 }
 
-void drawCalibrationScreen() {
+void drawCalibrationMenu() {
+  tft.fillScreen(ST77XX_BLACK);
   tft.setTextSize(2);
   tft.setTextColor(ST77XX_WHITE);
-  tft.setCursor(60, 10);
-  tft.print("CALIBRATION");
-  
-  tft.setTextSize(1);
-  tft.setCursor(20, 80);
-  tft.print("Set joysticks to center");
-  tft.setCursor(20, 100);
-  tft.print("position and press OK");
+  tft.setCursor(30, 80);
+  tft.println("Calibration Mode");
+  tft.setCursor(20, 120);
+  tft.println("Set sticks to center");
+  tft.setCursor(40, 160);
+  tft.println("Press OK to save");
 }
 
-void drawTrimSettingsScreen() {
+void drawTrimMenu() {
+  tft.fillScreen(ST77XX_BLACK);
   tft.setTextSize(2);
   tft.setTextColor(ST77XX_WHITE);
-  tft.setCursor(70, 10);
-  tft.print("TRIM");
-  
-  for (int i = 0; i < 5; i++) {
-    tft.setCursor(40, 50 + i * 30);
-    if (i == trimIndex) {
-      tft.setTextColor(ST77XX_RED);
-      tft.print("> ");
+  tft.setCursor(60, 100);
+  tft.println("Trim Menu");
+}
+
+void drawSettingsMenu() {
+  tft.fillScreen(ST77XX_BLACK);
+  tft.setTextSize(2);
+  tft.setTextColor(ST77XX_WHITE);
+  tft.setCursor(50, 80);
+  tft.println("Settings");
+  tft.setCursor(30, 120);
+  tft.println("Reset to defaults");
+  tft.setCursor(30, 160);
+  tft.println("Back to main menu");
+}
+
+void drawResetConfirm() {
+  tft.fillScreen(ST77XX_BLACK);
+  tft.setTextSize(2);
+  tft.setTextColor(ST77XX_WHITE);
+  tft.setCursor(30, 80);
+  tft.println("Reset settings?");
+  tft.setCursor(40, 120);
+  tft.println("OK - Confirm");
+  tft.setCursor(40, 160);
+  tft.println("BACK - Cancel");
+}
+
+void handleMenuNavigation() {
+  if (buttonStates & (1 << BTN_MENU) && !(prevButtonStates & (1 << BTN_MENU))) {
+    if (currentMenu == MAIN_SCREEN) {
+      currentMenu = MAIN_MENU;
+      menuIndex = 0;
+      drawMainMenu();
     } else {
-      tft.setTextColor(ST77XX_WHITE);
-      tft.print("  ");
+      currentMenu = MAIN_SCREEN;
+      drawStaticElements();
     }
-    
-    if (i < 4) {
-      switch(i) {
-        case 0: tft.print("Roll: "); break;
-        case 1: tft.print("Pitch: "); break;
-        case 2: tft.print("Throttle: "); break;
-        case 3: tft.print("Yaw: "); break;
+  }
+  
+  switch (currentMenu) {
+    case MAIN_MENU:
+      processMainMenu();
+      break;
+    case CALIBRATION_MENU:
+      processCalibrationMenu();
+      break;
+    case TRIM_MENU:
+      processTrimMenu();
+      break;
+    case SETTINGS_MENU:
+      processSettingsMenu();
+      break;
+    case RESET_CONFIRM:
+      if (buttonStates & (1 << BTN_OK) && !(prevButtonStates & (1 << BTN_OK))) {
+        resetSettings();
+        currentMenu = MAIN_SCREEN;
+        drawStaticElements();
+      } else if (buttonStates & (1 << BTN_BACK) && !(prevButtonStates & (1 << BTN_BACK))) {
+        currentMenu = SETTINGS_MENU;
+        drawSettingsMenu();
       }
-      tft.print(controlData.trim[i]);
-    } else {
-      tft.print("Back");
+      break;
+  }
+}
+
+void processMainMenu() {
+  if (buttonStates & (1 << BTN_UP) && !(prevButtonStates & (1 << BTN_UP))) {
+    menuIndex = (menuIndex - 1 + menuItems) % menuItems;
+    drawMainMenu();
+  }
+  if (buttonStates & (1 << BTN_DOWN) && !(prevButtonStates & (1 << BTN_DOWN))) {
+    menuIndex = (menuIndex + 1) % menuItems;
+    drawMainMenu();
+  }
+  
+  if (buttonStates & (1 << BTN_OK) && !(prevButtonStates & (1 << BTN_OK))) {
+    switch (menuIndex) {
+      case 0: 
+        currentMenu = CALIBRATION_MENU;
+        drawCalibrationMenu();
+        break;
+      case 1: 
+        currentMenu = TRIM_MENU;
+        drawTrimMenu();
+        break;
+      case 3: 
+        currentMenu = SETTINGS_MENU;
+        drawSettingsMenu();
+        break;
+      case 4: 
+        currentMenu = MAIN_SCREEN;
+        drawStaticElements();
+        break;
     }
   }
 }
 
-void drawResetConfirmScreen() {
-  tft.setTextSize(2);
-  tft.setTextColor(ST77XX_WHITE);
-  tft.setCursor(30, 10);
-  tft.print("CONFIRM RESET");
+void processCalibrationMenu() {
+  if (buttonStates & (1 << BTN_OK) && !(prevButtonStates & (1 << BTN_OK))) {
+    calibrateJoysticks();
+    currentMenu = MAIN_MENU;
+    drawMainMenu();
+  }
   
-  tft.setTextSize(1);
-  tft.setCursor(40, 80);
-  tft.print("Reset all settings?");
-  tft.setCursor(40, 110);
-  tft.print("OK - Yes, BACK - No");
+  if (buttonStates & (1 << BTN_BACK) && !(prevButtonStates & (1 << BTN_BACK))) {
+    currentMenu = MAIN_MENU;
+    drawMainMenu();
+  }
+}
+
+void processTrimMenu() {
+  if (buttonStates & (1 << BTN_BACK) && !(prevButtonStates & (1 << BTN_BACK))) {
+    currentMenu = MAIN_MENU;
+    drawMainMenu();
+  }
+}
+
+void processSettingsMenu() {
+  if (buttonStates & (1 << BTN_UP) && !(prevButtonStates & (1 << BTN_UP))) {
+    subMenuIndex = 0;
+    drawSettingsMenu();
+  }
+  if (buttonStates & (1 << BTN_DOWN) && !(prevButtonStates & (1 << BTN_DOWN))) {
+    subMenuIndex = 1;
+    drawSettingsMenu();
+  }
+  
+  if (buttonStates & (1 << BTN_OK) && !(prevButtonStates & (1 << BTN_OK))) {
+    if (subMenuIndex == 0) {
+      currentMenu = RESET_CONFIRM;
+      drawResetConfirm();
+    } else {
+      currentMenu = MAIN_MENU;
+      drawMainMenu();
+    }
+  }
 }
 
 void calibrateJoysticks() {
-  calibration.joy1X_center = analogRead(JOY1_X);
-  calibration.joy1Y_center = analogRead(JOY1_Y);
-  calibration.joy2X_center = analogRead(JOY2_X);
-  calibration.joy2Y_center = analogRead(JOY2_Y);
-  calibration.checksum = calculateChecksum();
-}
-
-void saveCalibration() {
-  EEPROM.put(0, calibration);
-}
-
-void loadCalibration() {
-  EEPROM.get(0, calibration);
-}
-
-uint8_t calculateChecksum() {
-  uint8_t sum = 0;
-  uint8_t* data = (uint8_t*)&calibration;
-  for (size_t i = 0; i < sizeof(calibration) - 1; i++) {
-    sum += data[i];
-  }
-  return sum;
-}
-
-void resetToDefaults() {
-  calibration.joy1X_center = 512;
-  calibration.joy1Y_center = 512;
-  calibration.joy2X_center = 512;
-  calibration.joy2Y_center = 512;
-  calibration.checksum = calculateChecksum();
-  saveCalibration();
+  settings.joy1XCenter = analogRead(JOY1_X);
+  settings.joy1YCenter = analogRead(JOY1_Y);
+  settings.joy2XCenter = analogRead(JOY2_X);
+  settings.joy2YCenter = analogRead(JOY2_Y);
   
-  for (int i = 0; i < 4; i++) {
-    controlData.trim[i] = 0;
-  }
+  settings.trim1X = 127;
+  settings.trim1Y = 127;
+  settings.trim2X = 127;
+  settings.trim2Y = 127;
+  
+  saveSettings();
+  
+  // Сбрасываем предыдущие значения для обновления дисплея
+  prevJoy1X = prevJoy1Y = prevJoy2X = prevJoy2Y = 0;
+  prevTrim1X = prevTrim1Y = prevTrim2X = prevTrim2Y = 0;
+  
+  tft.fillScreen(ST77XX_BLACK);
+  tft.setTextSize(2);
+  tft.setTextColor(ST77XX_WHITE);
+  tft.setCursor(40, 100);
+  tft.println("Calibration");
+  tft.setCursor(60, 140);
+  tft.println("Complete!");
+  delay(1000);
 }
 
-void beep() {
-  digitalWrite(BUZZER_PIN, HIGH);
-  delay(50);
-  digitalWrite(BUZZER_PIN, LOW);
+void resetSettings() {
+  settings.joy1XCenter = 512;
+  settings.joy1YCenter = 512;
+  settings.joy2XCenter = 512;
+  settings.joy2YCenter = 512;
+  settings.trim1X = 127;
+  settings.trim1Y = 127;
+  settings.trim2X = 127;
+  settings.trim2Y = 127;
+  settings.channelMapping = 0x12;
+  
+  saveSettings();
+  
+  // Сбрасываем предыдущие значения для обновления дисплея
+  prevJoy1X = prevJoy1Y = prevJoy2X = prevJoy2Y = 0;
+  prevTrim1X = prevTrim1Y = prevTrim2X = prevTrim2Y = 0;
+  
+  calibrateJoysticks();
+}
+
+void saveSettings() {
+  EEPROM.put(0, settings);
+}
+
+void loadSettings() {
+  EEPROM.get(0, settings);
+}
+
+void sendData() {
+  txData.buttons = buttonStates & 0xFF;
+  txData.trim1X = settings.trim1X;
+  txData.trim1Y = settings.trim1Y;
+  txData.trim2X = settings.trim2X;
+  txData.trim2Y = settings.trim2Y;
+  
+  radio.write(&txData, sizeof(txData));
 }
